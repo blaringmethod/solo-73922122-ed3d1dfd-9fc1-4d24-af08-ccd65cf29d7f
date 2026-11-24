@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}馆藏迁库拆表{% endblock %}</title>
+  <style>
+    :root { --line:#d8dde6; --bg:#f5f7fa; --blue:#1f5fbf; --red:#c0392b; --amber:#b7791f; --green:#2f7d3b; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: "PingFang SC","Microsoft YaHei","Noto Sans CJK SC",sans-serif; background:var(--bg); color:#1c2733; }
+    header { background:#163a66; color:#fff; padding:14px 24px; display:flex; align-items:baseline; gap:16px; flex-wrap:wrap; }
+    header a { color:#cfe0ff; text-decoration:none; }
+    header h1 { font-size:19px; margin:0; }
+    main { max-width:1080px; margin:24px auto; padding:0 20px; }
+    .card { background:#fff; border:1px solid var(--line); border-radius:8px; padding:18px 20px; margin-bottom:20px; }
+    h2 { font-size:16px; margin:0 0 12px; }
+    table { border-collapse:collapse; width:100%; font-size:13.5px; }
+    th, td { border:1px solid var(--line); padding:7px 9px; text-align:left; vertical-align:top; }
+    th { background:#eef2f8; }
+    .muted { color:#66788a; font-size:12.5px; }
+    .flash { padding:10px 14px; border-radius:6px; margin-bottom:14px; font-size:13.5px; }
+    .flash.ok { background:#e6f4ea; border:1px solid #b7dfc1; color:var(--green); }
+    .flash.error { background:#fdecea; border:1px solid #f3b9b2; color:var(--red); }
+    .badge { display:inline-block; padding:2px 9px; border-radius:11px; font-size:12px; white-space:nowrap; }
+    .badge.unique { background:#e6f4ea; color:var(--green); }
+    .badge.pending { background:#fff6e0; color:var(--amber); }
+    .badge.conflict, .badge.empty { background:#fdecea; color:var(--red); }
+    button, .btn { background:var(--blue); color:#fff; border:0; border-radius:6px; padding:8px 16px; font-size:13.5px; cursor:pointer; text-decoration:none; display:inline-block; }
+    button.secondary { background:#5a6b7e; }
+    button:disabled { background:#aab4bf; cursor:not-allowed; }
+    input[type=file], input[type=text], input[type=number] { padding:7px 9px; border:1px solid var(--line); border-radius:6px; font-size:13.5px; }
+    form.inline { display:inline; }
+    .row { display:flex; gap:14px; flex-wrap:wrap; align-items:center; }
+    .stat { font-size:13.5px; }
+    .stat b { font-size:16px; }
+    code { background:#eef2f8; padding:1px 5px; border-radius:4px; }
+    .reason { color:var(--red); font-size:12.5px; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>馆藏迁库 · 宽表拆表工具</h1>
+  <a href="{{ url_for('index') }}">首页</a>
+</header>
+<main>
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+      <div class="flash {{ category }}">{{ message }}</div>
+    {% endfor %}
+  {% endwith %}
+  {% block body %}{% endblock %}
+</main>
+</body>
+</html>

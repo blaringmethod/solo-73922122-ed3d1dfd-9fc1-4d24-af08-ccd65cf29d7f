@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}作品 {{ work_no }} · 拆表{% endblock %}
+{% block body %}
+<section class="card">
+  <h2>作品 {{ work_no }}
+    <span class="badge {{ result.status }}" style="margin-left:8px">{{ status_labels[result.status] }}</span>
+  </h2>
+  {% if result.reasons %}
+    <p class="reason">{{ result.reasons|join('；') }}</p>
+  {% endif %}
+
+  <h2 style="margin-top:18px">宽表输入行（不展开重复行，同名组合已归并）</h2>
+  <table>
+    <thead><tr><th>题名</th><th>展名</th><th>组合次数</th></tr></thead>
+    <tbody>
+    {% for t, e, c in rows %}
+      <tr>
+        <td>{{ t if t is not none else '（空 · 无题名明细）' }}</td>
+        <td>{{ e if e is not none else '（空 · 无参展明细）' }}</td>
+        <td>{{ c }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h2>登记 / 更正底账总条数</h2>
+  <p class="muted">底账指该作品在题名明细或参展明细表中的实际行数（即各名称份数之和）。留空提交可清除该项登记。</p>
+  <div class="row" style="align-items:flex-start">
+    <form method="post" action="{{ url_for('update_ledger', work_no=work_no) }}" class="row">
+      <input type="hidden" name="kind" value="title">
+      <label>题名底账总条数
+        <input type="number" min="0" name="total"
+               value="{{ ledgers.title if ledgers.title is not none else '' }}">
+      </label>
+      <button type="submit">保存题名底账</button>
+    </form>
+    <form method="post" action="{{ url_for('update_ledger', work_no=work_no) }}" class="row">
+      <input type="hidden" name="kind" value="exhibition">
+      <label>参展底账总条数
+        <input type="number" min="0" name="total"
+               value="{{ ledgers.exhibition if ledgers.exhibition is not none else '' }}">
+      </label>
+      <button type="submit">保存参展底账</button>
+    </form>
+  </div>
+</section>
+
+{% if result.status == 'unique' %}
+<section class="card">
+  <h2>当前唯一拆分结果</h2>
+  <div class="row" style="align-items:flex-start; gap:30px">
+    <div>
+      <b>题名份数</b>（合计 {{ result.title_total }}）
+      <table style="margin-top:8px">
+        <thead><tr><th>题名</th><th>份数</th></tr></thead>
+        <tbody>
+        {% for name, cnt in result.title_counts.items() %}
+          <tr><td>{{ name }}</td><td>{{ cnt }}</td></tr>
+        {% else %}
+          <tr><td colspan="2" class="muted">无题名明细</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <b>参展份数</b>（合计 {{ result.exhibition_total }}）
+      <table style="margin-top:8px">
+        <thead><tr><th>展名</th><th>份数</th></tr></thead>
+        <tbody>
+        {% for name, cnt in result.exhibition_counts.items() %}
+          <tr><td>{{ name }}</td><td>{{ cnt }}</td></tr>
+        {% else %}
+          <tr><td colspan="2" class="muted">无参展明细</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{% endif %}
+<p><a href="{{ url_for('index') }}">← 返回首页</a></p>
+{% endblock %}

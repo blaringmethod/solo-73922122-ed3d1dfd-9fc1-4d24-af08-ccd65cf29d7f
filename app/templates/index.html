@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block body %}
+<section class="card">
+  <h2>1. 上传宽表 CSV</h2>
+  <p class="muted">
+    列：<code>作品号,题名,展名,组合次数</code>。题名或展名留空表示该作品没有此类明细；
+    原明细允许同名，同名组合行的次数会自动归并求和。重新上传将整体替换当前输入。
+  </p>
+  <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data" class="row">
+    <input type="file" name="csv_file" accept=".csv" required>
+    <button type="submit">上传并入库</button>
+  </form>
+  {% if batch_id %}
+  <p class="muted" style="margin-top:10px">
+    当前批次：<b>{{ batch_id }}</b> ｜ 数据版本：<b>{{ version }}</b>
+    （每次上传或底账登记/更正都会产生新版本，核对与下载以当时已提交版本为准）
+  </p>
+  {% endif %}
+</section>
+
+{% if summary %}
+<section class="card">
+  <h2>2. 核对与下载</h2>
+  <div class="row" style="gap:26px; margin-bottom:14px">
+    <span class="stat">作品总数 <b>{{ summary.work_count }}</b></span>
+    <span class="stat" style="color:var(--green)">唯一可拆 <b>{{ summary.unique_count }}</b></span>
+    <span class="stat" style="color:var(--amber)">待补底账 <b>{{ summary.pending|length }}</b></span>
+    <span class="stat" style="color:var(--red)">冲突 <b>{{ summary.conflicts|length }}</b></span>
+  </div>
+  <div class="row">
+    <form method="post" action="{{ url_for('check') }}" class="inline">
+      <button type="submit" class="secondary">立即核对（生成快照）</button>
+    </form>
+    <form method="post" action="{{ url_for('download') }}" class="inline"
+          onsubmit="return confirm('下载将以当前已提交状态（版本 {{ version }}）为准，确定继续？');">
+      <button type="submit" {% if not summary.all_unique %}disabled
+        title="仍有冲突或待补底账作品，全部唯一可拆后才能下载"{% endif %}>
+        打包下载两份明细 CSV
+      </button>
+    </form>
+  </div>
+  {% if not summary.all_unique %}
+  <p class="muted" style="margin-top:10px">
+    待补底账作品：{% if summary.pending %}{{ summary.pending|join('、') }}{% else %}无{% endif %}
+    ｜ 冲突作品：{% if summary.conflicts %}{{ summary.conflicts|join('、') }}{% else %}无{% endif %}
+  </p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>3. 作品列表（当前已提交状态）</h2>
+  <table>
+    <thead>
+      <tr><th>作品号</th><th>状态</th><th>题名底账</th><th>参展底账</th>
+        <th>推出的题名总份数</th><th>推出的参展总份数</th><th>说明</th><th></th></tr>
+    </thead>
+    <tbody>
+    {% for r in results %}
+      <tr>
+        <td>{{ r.work_no }}</td>
+        <td><span class="badge {{ r.status }}">{{ status_labels[r.status] }}</span></td>
+        <td>{{ r.title_ledger if r.title_ledger is not none else '—' }}</td>
+        <td>{{ r.exhib_ledger if r.exhib_ledger is not none else '—' }}</td>
+        <td>{{ r.title_total if r.title_total is not none else '—' }}</td>
+        <td>{{ r.exhibition_total if r.exhibition_total is not none else '—' }}</td>
+        <td class="reason">{{ r.reasons|join('；') }}</td>
+        <td><a class="btn" href="{{ url_for('work_detail', work_no=r.work_no) }}">登记/更正</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>操作记录</h2>
+  {% if events %}
+  <table>
+    <thead><tr><th>时间</th><th>类型</th><th>内容</th></tr></thead>
+    <tbody>
+    {% for e in events %}
+      <tr><td class="muted">{{ e.created_at }}</td><td>{{ e.kind }}</td><td>{{ e.detail }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">暂无操作记录。</p>
+  {% endif %}
+</section>
+{% endblock %}

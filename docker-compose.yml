@@ -1,0 +1,13 @@
+services:
+  web:
+    build: .
+    image: museum-split:latest
+    container_name: museum-split-web
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    environment:
+      SPLIT_DB_PATH: /data/museum.db
+      SECRET_KEY: change-me-in-production
+    restart: unless-stopped
