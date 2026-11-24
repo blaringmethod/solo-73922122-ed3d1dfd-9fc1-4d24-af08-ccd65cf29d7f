@@ -6,6 +6,14 @@
 2. 馆员按作品登记/更正的两类底账总条数（ledgers）；
 3. 每次核对/下载所基于的已提交版本快照（snapshots、snapshot_works），
    核对期间允许继续补登，而核对结论与下载内容始终对应同一版本。
+
+入库增量发布相关：
+4. 份号状态（copy_state 记录每个 (作品号,类别,名称) 的历史最大份号，
+   revoked_ranges 记录已永久停用的号段——均按区间存储，不逐份展开）；
+5. 已发布的增量包（packages + package_ranges，CSV 原文随包保存，
+   凭包号可重下原 CSV）；
+6. 待提交的发布计划（publish_plans + publish_plan_ranges），
+   计划记录计算时的数据版本与最近包号，提交时校验未变动才生效。
 """
 from __future__ import annotations
 
@@ -13,7 +21,10 @@ import csv
 import io
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Tuple
+
+from . import publish
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -70,6 +81,80 @@ CREATE TABLE IF NOT EXISTS snapshot_works (
     reasons          TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (snapshot_id, work_no)
 );
+
+-- ---------------- 入库增量发布 ----------------
+
+-- 每个 (作品号, 类别, 名称) 的历史最大份号；有效份号 = [1, max_issued] 去掉
+-- revoked_ranges 中的号段。只存最大号与区间，不逐份展开。
+CREATE TABLE IF NOT EXISTS copy_state (
+    work_no    TEXT NOT NULL,
+    kind       TEXT NOT NULL CHECK (kind IN ('title','exhibition')),
+    name       TEXT NOT NULL,
+    max_issued INTEGER NOT NULL DEFAULT 0 CHECK (max_issued >= 0),
+    PRIMARY KEY (work_no, kind, name)
+);
+
+-- 已撤销（永久停用）的份号区间
+CREATE TABLE IF NOT EXISTS revoked_ranges (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    work_no TEXT NOT NULL,
+    kind    TEXT NOT NULL,
+    name    TEXT NOT NULL,
+    r_start INTEGER NOT NULL CHECK (r_start >= 1),
+    r_end   INTEGER NOT NULL CHECK (r_end >= r_start)
+);
+CREATE INDEX IF NOT EXISTS idx_revoked_key ON revoked_ranges(work_no, kind, name);
+
+-- 已发布的增量包；csv_content 保存发包时的 CSV 原文，凭包号可重下
+CREATE TABLE IF NOT EXISTS packages (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    prev_id      INTEGER NOT NULL DEFAULT 0,   -- 前一包号，0 表示首包
+    data_version INTEGER NOT NULL,
+    batch_id     INTEGER NOT NULL,
+    add_count    INTEGER NOT NULL,
+    revoke_count INTEGER NOT NULL,
+    csv_content  TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS package_ranges (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_id INTEGER NOT NULL REFERENCES packages(id),
+    work_no    TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    action     TEXT NOT NULL CHECK (action IN ('add','revoke')),
+    r_start    INTEGER NOT NULL,
+    r_end      INTEGER NOT NULL CHECK (r_end >= r_start)
+);
+CREATE INDEX IF NOT EXISTS idx_pkg_ranges ON package_ranges(package_id);
+
+-- 待提交的发布计划：记录计算时的数据版本与最近包号，提交时校验
+CREATE TABLE IF NOT EXISTS publish_plans (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    data_version  INTEGER NOT NULL,
+    batch_id      INTEGER NOT NULL,
+    base_package  INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT 'pending'
+                  CHECK (status IN ('pending','published','superseded')),
+    add_count     INTEGER NOT NULL,
+    revoke_count  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS publish_plan_ranges (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id INTEGER NOT NULL REFERENCES publish_plans(id),
+    work_no TEXT NOT NULL,
+    kind    TEXT NOT NULL,
+    name    TEXT NOT NULL,
+    action  TEXT NOT NULL CHECK (action IN ('add','revoke')),
+    r_start INTEGER NOT NULL,
+    r_end   INTEGER NOT NULL CHECK (r_end >= r_start),
+    old_cnt INTEGER NOT NULL,
+    new_cnt INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plan_ranges ON publish_plan_ranges(plan_id);
 """
 
 CSV_HEADERS = ["作品号", "题名", "展名", "组合次数"]
@@ -101,6 +186,23 @@ def transaction(conn: sqlite3.Connection):
     except Exception:
         conn.rollback()
         raise
+
+
+@contextmanager
+def immediate_transaction(conn: sqlite3.Connection):
+    """BEGIN IMMEDIATE 事务：进入即取写锁，用于发布提交等
+    “先校验再写入”的场景，保证校验与写入之间没有他人提交。"""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+class StaleStateError(RuntimeError):
+    """提交时宽表、底账或最近一包已变动，需重新计算后再提交。"""
 
 
 def get_meta(conn: sqlite3.Connection, key: str, default: Optional[str] = None) -> Optional[str]:
@@ -321,4 +423,184 @@ def get_snapshot_works(conn: sqlite3.Connection, snap_id: int) -> List[sqlite3.R
     return list(conn.execute(
         "SELECT * FROM snapshot_works WHERE snapshot_id=? ORDER BY work_no",
         (snap_id,),
+    ))
+
+
+# ---------------------------------------------------------------- 增量发布
+
+def latest_package_id(conn: sqlite3.Connection) -> int:
+    """最近一包号；从未发布返回 0。"""
+    row = conn.execute("SELECT MAX(id) AS mid FROM packages").fetchone()
+    return int(row["mid"] or 0)
+
+
+def load_copy_state(conn: sqlite3.Connection) -> Dict[publish.Key, dict]:
+    """读取全部 (作品号,类别,名称) 的份号状态：历史最大号 + 已撤销区间。"""
+    state: Dict[publish.Key, dict] = {}
+    for r in conn.execute(
+            "SELECT work_no, kind, name, max_issued FROM copy_state"):
+        state[(r["work_no"], r["kind"], r["name"])] = {
+            "max_issued": r["max_issued"], "revoked": []}
+    for r in conn.execute(
+            "SELECT work_no, kind, name, r_start, r_end FROM revoked_ranges "
+            "ORDER BY work_no, kind, name, r_start"):
+        key = (r["work_no"], r["kind"], r["name"])
+        state.setdefault(key, {"max_issued": 0, "revoked": []})
+        state[key]["revoked"].append((r["r_start"], r["r_end"]))
+    return state
+
+
+def save_plan(
+    conn: sqlite3.Connection,
+    changes: List[dict],
+    data_version: int,
+    batch_id: int,
+    base_package: int,
+) -> int:
+    """保存一份待提交的发布计划；此前的待提交计划一并作废。"""
+    add_total = sum(c["r_end"] - c["r_start"] + 1
+                    for c in changes if c["action"] == publish.ACTION_ADD)
+    revoke_total = sum(c["r_end"] - c["r_start"] + 1
+                       for c in changes if c["action"] == publish.ACTION_REVOKE)
+    with transaction(conn):
+        conn.execute(
+            "UPDATE publish_plans SET status='superseded' WHERE status='pending'")
+        cur = conn.execute(
+            "INSERT INTO publish_plans(data_version, batch_id, base_package, "
+            "status, add_count, revoke_count) VALUES(?,?,?,'pending',?,?)",
+            (data_version, batch_id, base_package, add_total, revoke_total),
+        )
+        plan_id = cur.lastrowid
+        conn.executemany(
+            "INSERT INTO publish_plan_ranges(plan_id, work_no, kind, name, "
+            "action, r_start, r_end, old_cnt, new_cnt) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            [(plan_id, c["work_no"], c["kind"], c["name"], c["action"],
+              c["r_start"], c["r_end"], c["old_cnt"], c["new_cnt"])
+             for c in changes],
+        )
+        conn.execute(
+            "INSERT INTO events(kind, detail) VALUES('publish_calculate', ?)",
+            (f"计划 {plan_id}：补入 {add_total} 份、撤销 {revoke_total} 份"
+             f"（基于数据版本 {data_version}，前一包 {base_package}）",),
+        )
+    return plan_id
+
+
+def get_plan(conn: sqlite3.Connection, plan_id: int) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM publish_plans WHERE id=?", (plan_id,)).fetchone()
+
+
+def get_pending_plan(conn: sqlite3.Connection) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM publish_plans WHERE status='pending' "
+        "ORDER BY id DESC LIMIT 1").fetchone()
+
+
+def get_plan_ranges(conn: sqlite3.Connection, plan_id: int) -> List[sqlite3.Row]:
+    return list(conn.execute(
+        "SELECT * FROM publish_plan_ranges WHERE plan_id=? ORDER BY id",
+        (plan_id,),
+    ))
+
+
+def apply_plan(conn: sqlite3.Connection, plan_id: int) -> int:
+    """提交发布计划：新包与份号状态在同一事务内生效。
+
+    提交时若宽表/底账（数据版本）或最近一包已变动，抛出 StaleStateError；
+    任何失败都会回滚，保留原发布状态。返回新包号。
+    """
+    with immediate_transaction(conn):
+        plan = get_plan(conn, plan_id)
+        if plan is None:
+            raise RuntimeError("发布计划不存在")
+        if plan["status"] == "published":
+            raise RuntimeError("该计划已发布过，不能重复提交")
+        if plan["status"] != "pending":
+            raise RuntimeError("该计划已作废，请重新计算")
+        if (current_version(conn) != plan["data_version"]
+                or latest_package_id(conn) != plan["base_package"]):
+            raise StaleStateError(
+                "宽表、底账或最近一包已变动，请重新计算后再提交")
+        changes = [dict(r) for r in conn.execute(
+            "SELECT work_no, kind, name, action, r_start, r_end "
+            "FROM publish_plan_ranges WHERE plan_id=? ORDER BY id",
+            (plan_id,))]
+        if not changes:
+            raise RuntimeError("计划内没有任何变更，无需发布")
+
+        prev_id = latest_package_id(conn)
+        batch_id = current_batch_id(conn)
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cur = conn.execute(
+            "INSERT INTO packages(created_at, prev_id, data_version, batch_id, "
+            "add_count, revoke_count, csv_content) VALUES(?,?,?,?,?,?, '')",
+            (created_at, prev_id, plan["data_version"], batch_id,
+             plan["add_count"], plan["revoke_count"]),
+        )
+        package_id = cur.lastrowid
+
+        # 应用份号状态：补入推进历史最大号；撤销写入永久停用的号段（合并相邻）
+        for c in changes:
+            key = (c["work_no"], c["kind"], c["name"])
+            if c["action"] == publish.ACTION_ADD:
+                conn.execute(
+                    "INSERT INTO copy_state(work_no, kind, name, max_issued) "
+                    "VALUES(?,?,?,?) ON CONFLICT(work_no, kind, name) "
+                    "DO UPDATE SET max_issued=excluded.max_issued",
+                    (key[0], key[1], key[2], c["r_end"]),
+                )
+            else:
+                existing = [(r["r_start"], r["r_end"]) for r in conn.execute(
+                    "SELECT r_start, r_end FROM revoked_ranges "
+                    "WHERE work_no=? AND kind=? AND name=?", key)]
+                merged = publish.normalize_ranges(
+                    existing + [(c["r_start"], c["r_end"])])
+                conn.execute(
+                    "DELETE FROM revoked_ranges "
+                    "WHERE work_no=? AND kind=? AND name=?", key)
+                conn.executemany(
+                    "INSERT INTO revoked_ranges(work_no, kind, name, "
+                    "r_start, r_end) VALUES(?,?,?,?,?)",
+                    [(key[0], key[1], key[2], s, e) for s, e in merged],
+                )
+        conn.executemany(
+            "INSERT INTO package_ranges(package_id, work_no, kind, name, "
+            "action, r_start, r_end) VALUES(?,?,?,?,?,?,?)",
+            [(package_id, c["work_no"], c["kind"], c["name"], c["action"],
+              c["r_start"], c["r_end"]) for c in changes],
+        )
+        csv_text = publish.build_package_csv(
+            package_id, prev_id, plan["data_version"], batch_id,
+            created_at, changes)
+        conn.execute("UPDATE packages SET csv_content=? WHERE id=?",
+                     (csv_text, package_id))
+        conn.execute(
+            "UPDATE publish_plans SET status='published' WHERE id=?",
+            (plan_id,))
+        conn.execute(
+            "INSERT INTO events(kind, detail) VALUES('publish', ?)",
+            (f"包 {package_id} 发布：补入 {plan['add_count']} 份、"
+             f"撤销 {plan['revoke_count']} 份（前一包 {prev_id}）",),
+        )
+    return package_id
+
+
+def list_packages(conn: sqlite3.Connection, limit: int = 50) -> List[sqlite3.Row]:
+    return list(conn.execute(
+        "SELECT * FROM packages ORDER BY id DESC LIMIT ?", (limit,)))
+
+
+def get_package(conn: sqlite3.Connection, pkg_id: int) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM packages WHERE id=?", (pkg_id,)).fetchone()
+
+
+def get_package_ranges(
+    conn: sqlite3.Connection, pkg_id: int
+) -> List[sqlite3.Row]:
+    return list(conn.execute(
+        "SELECT * FROM package_ranges WHERE package_id=? ORDER BY id",
+        (pkg_id,),
     ))

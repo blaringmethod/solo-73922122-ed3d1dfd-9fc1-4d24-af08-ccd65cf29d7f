@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""业务编排：读取同一已提交状态 -> 逐作品拆分 -> 核对/导出。"""
+"""业务编排：读取同一已提交状态 -> 逐作品拆分 -> 核对/导出/增量发布。"""
 from __future__ import annotations
 
 import csv
@@ -7,7 +7,7 @@ import io
 import zipfile
 from typing import Dict, List, Optional, Tuple
 
-from . import db
+from . import db, publish
 from .splitting import (
     CONFLICT, EMPTY, PENDING, UNIQUE,
     SplitResult, rejoin_counts, split_work,
@@ -139,3 +139,53 @@ def build_download(conn) -> Tuple[int, bytes]:
                    "并已通过重新左联接逐组合核对\n")
         zf.writestr("README.txt", note.getvalue().encode("utf-8"))
     return snap_id, zip_buf.getvalue()
+
+
+# ---------------------------------------------------------------- 入库增量发布
+
+def calculate_plan(conn) -> Tuple[Optional[int], List[dict]]:
+    """计算增量发布计划，返回 (plan_id 或 None, 变更列表)。
+
+    用同一已提交状态的宽表和底账做拆分；全部作品都有唯一解才按上次发布的
+    份数算增减（首次发布时编号状态为空，即从零起算）。份数无变化时不生成
+    计划（plan_id 为 None），即不发包。不满足条件时抛出 RuntimeError。
+    """
+    if not db.current_batch_id(conn):
+        raise RuntimeError("还没有上传宽表数据，无法计算入库增量")
+    v1 = db.current_version(conn)
+    results = evaluate_all(conn)
+    summary = summarize(results)
+    if not summary["all_unique"]:
+        raise RuntimeError("存在冲突或待补底账的作品，全部唯一后才能计算入库增量")
+    errors = verify_rejoin(conn, results)
+    if errors:
+        raise RuntimeError("重新左联接自检失败：" + "；".join(errors))
+    v2 = db.current_version(conn)
+    if v1 != v2:
+        raise RuntimeError("计算期间宽表或底账已变动，请重新计算")
+    changes = publish.compute_changes(results, db.load_copy_state(conn))
+    if not changes:
+        return None, []
+    plan_id = db.save_plan(
+        conn, changes, v2, db.current_batch_id(conn), db.latest_package_id(conn))
+    return plan_id, changes
+
+
+def submit_plan(conn, plan_id: int) -> int:
+    """提交发布计划：新包与份号状态在同一事务内生效，失败保留原发布状态。
+
+    提交时若宽表、底账或最近一包已变动，抛出 db.StaleStateError（提示重试）。
+    """
+    return db.apply_plan(conn, plan_id)
+
+
+def publish_stats(conn) -> dict:
+    """当前在册（有效）份数统计，按类别分列。"""
+    stats = {"title_active": 0, "exhibition_active": 0}
+    for (_, kind, _), st in db.load_copy_state(conn).items():
+        n = publish.active_count(st["max_issued"], st["revoked"])
+        if kind == publish.KIND_TITLE:
+            stats["title_active"] += n
+        else:
+            stats["exhibition_active"] += n
+    return stats

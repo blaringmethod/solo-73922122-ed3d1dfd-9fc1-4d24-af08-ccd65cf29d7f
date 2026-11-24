@@ -48,7 +48,52 @@
 </section>
 
 <section class="card">
-  <h2>3. 作品列表（当前已提交状态）</h2>
+  <h2>3. 入库增量发布</h2>
+  <div class="row" style="gap:26px; margin-bottom:12px">
+    <span class="stat">最近一包
+      <b>{% if latest_package_id %}<a href="{{ url_for('package_view', pkg_id=latest_package_id) }}">#{{ latest_package_id }}</a>{% else %}从未发布{% endif %}</b></span>
+    <span class="stat">题名在册 <b>{{ publish_stats.title_active }}</b> 份</span>
+    <span class="stat">参展在册 <b>{{ publish_stats.exhibition_active }}</b> 份</span>
+  </div>
+  <div class="row">
+    <form method="post" action="{{ url_for('publish_calculate') }}" class="inline">
+      <button type="submit" {% if not summary or not summary.all_unique %}disabled
+        title="全部作品唯一可拆后才能计算入库增量"{% endif %}>
+        计算增量（生成发布计划）
+      </button>
+    </form>
+    {% if pending_plan %}
+    <a class="btn" href="{{ url_for('publish_plan_view', plan_id=pending_plan.id) }}">
+      查看待提交计划 #{{ pending_plan.id }}（补 {{ pending_plan.add_count }} / 撤 {{ pending_plan.revoke_count }}）
+    </a>
+    {% endif %}
+  </div>
+  <p class="muted" style="margin-top:10px">
+    全部作品唯一可拆后，按上次发布的份数计算增减（首次从零起算）；份数无变化不发包。
+    补入从历史最大份号接着发，撤销从最大有效份号起依次收回且永久停用。
+    计算后仍可上传/更正；提交时若宽表、底账或最近一包已变动，将提示重试。
+  </p>
+  {% if packages %}
+  <table style="margin-top:6px">
+    <thead><tr><th>包号</th><th>时间</th><th>前一包</th><th>补入份数</th><th>撤销份数</th><th></th></tr></thead>
+    <tbody>
+    {% for p in packages %}
+      <tr>
+        <td><a href="{{ url_for('package_view', pkg_id=p.id) }}">#{{ p.id }}</a></td>
+        <td class="muted">{{ p.created_at }}</td>
+        <td>{{ p.prev_id if p.prev_id else '—' }}</td>
+        <td>{{ p.add_count }}</td>
+        <td>{{ p.revoke_count }}</td>
+        <td><a class="btn" href="{{ url_for('package_csv', pkg_id=p.id) }}">重下 CSV</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>4. 作品列表（当前已提交状态）</h2>
   <table>
     <thead>
       <tr><th>作品号</th><th>状态</th><th>题名底账</th><th>参展底账</th>

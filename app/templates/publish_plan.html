@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}增量发布计划 {{ plan.id }}{% endblock %}
+{% block body %}
+<section class="card">
+  <h2>增量发布计划 #{{ plan.id }}
+    {% if plan.status == 'published' %}
+      <span class="badge unique" style="margin-left:8px">已发布</span>
+    {% elif plan.status == 'pending' and not stale %}
+      <span class="badge pending" style="margin-left:8px">待提交</span>
+    {% else %}
+      <span class="badge conflict" style="margin-left:8px">已失效</span>
+    {% endif %}
+  </h2>
+  <p class="muted">
+    生成时间：{{ plan.created_at }} ｜ 基于数据版本：{{ plan.data_version }} ｜
+    基于包号：{{ plan.base_package if plan.base_package else '（首包）' }} ｜
+    当前数据版本：{{ current_version }} ｜
+    当前最近包：{{ latest_package if latest_package else '（无）' }}
+  </p>
+  <div class="row" style="gap:26px">
+    <span class="stat" style="color:var(--green)">补入 <b>{{ plan.add_count }}</b> 份</span>
+    <span class="stat" style="color:var(--red)">撤销 <b>{{ plan.revoke_count }}</b> 份</span>
+  </div>
+  {% if stale %}
+  <p class="reason" style="margin-top:10px">
+    ⚠ 自本计划生成后，宽表、底账或最近一包已变动，提交将被拒绝。请按当前状态重新计算。
+  </p>
+  {% endif %}
+  {% if plan.status == 'pending' %}
+  <div class="row" style="margin-top:12px">
+    <form method="post" action="{{ url_for('publish_submit', plan_id=plan.id) }}" class="inline"
+          onsubmit="return confirm('提交后新包与份号状态将一同生效，确定发布？');">
+      <button type="submit" {% if stale %}disabled
+        title="状态已变动，请重新计算"{% endif %}>提交发布</button>
+    </form>
+    <form method="post" action="{{ url_for('publish_calculate') }}" class="inline">
+      <button type="submit" class="secondary">按当前状态重新计算</button>
+    </form>
+  </div>
+  <p class="muted" style="margin-top:8px">
+    计算后仍可继续上传宽表或更正底账；若提交时宽表、底账或最近一包已变动，将提示重试。
+  </p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>变更明细（连续号段，不逐份展开）</h2>
+  <table>
+    <thead>
+      <tr><th>作品号</th><th>类别</th><th>名称</th><th>动作</th><th>号段</th>
+        <th>份数</th><th>份数变化</th></tr>
+    </thead>
+    <tbody>
+    {% for r in ranges %}
+      <tr>
+        <td>{{ r.work_no }}</td>
+        <td>{{ kind_labels[r.kind] }}</td>
+        <td>{{ r.name }}</td>
+        <td>{{ action_labels[r.action] }}</td>
+        <td>{{ r.r_start }}–{{ r.r_end }}</td>
+        <td>{{ r.r_end - r.r_start + 1 }}</td>
+        <td>{{ r.old_cnt }} → {{ r.new_cnt }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+<p><a href="{{ url_for('index') }}">← 返回首页</a></p>
+{% endblock %}

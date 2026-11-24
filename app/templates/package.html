@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}增量包 {{ pkg.id }}{% endblock %}
+{% block body %}
+<section class="card">
+  <h2>增量包 #{{ pkg.id }}</h2>
+  <p class="muted">
+    发布时间：{{ pkg.created_at }} ｜ 前一包号：{{ pkg.prev_id if pkg.prev_id else '（首包）' }} ｜
+    基于数据版本：{{ pkg.data_version }} ｜ 宽表批次：{{ pkg.batch_id }}
+  </p>
+  <div class="row" style="gap:26px">
+    <span class="stat" style="color:var(--green)">补入 <b>{{ pkg.add_count }}</b> 份</span>
+    <span class="stat" style="color:var(--red)">撤销 <b>{{ pkg.revoke_count }}</b> 份</span>
+  </div>
+  <div class="row" style="margin-top:12px">
+    <a class="btn" href="{{ url_for('package_csv', pkg_id=pkg.id) }}">重下原 CSV</a>
+  </div>
+  <p class="muted" style="margin-top:8px">
+    CSV 原文随包保存，凭包号重复下载内容一致；撤掉的份号永久停用，不会再次发放。
+  </p>
+</section>
+
+<section class="card">
+  <h2>包内号段（连续号段，不逐份展开）</h2>
+  <table>
+    <thead>
+      <tr><th>作品号</th><th>类别</th><th>名称</th><th>动作</th><th>号段</th><th>份数</th></tr>
+    </thead>
+    <tbody>
+    {% for r in ranges %}
+      <tr>
+        <td>{{ r.work_no }}</td>
+        <td>{{ kind_labels[r.kind] }}</td>
+        <td>{{ r.name }}</td>
+        <td>{{ action_labels[r.action] }}</td>
+        <td>{{ r.r_start }}–{{ r.r_end }}</td>
+        <td>{{ r.r_end - r.r_start + 1 }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+<p><a href="{{ url_for('index') }}">← 返回首页</a></p>
+{% endblock %}

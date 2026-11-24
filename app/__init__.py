@@ -10,7 +10,7 @@ from flask import (
     request, send_file, url_for,
 )
 
-from . import db, service
+from . import db, publish, service
 
 
 def create_app(db_path: str | None = None) -> Flask:
@@ -45,6 +45,10 @@ def create_app(db_path: str | None = None) -> Flask:
             results=results, summary=summary,
             ledgers=ledgers, events=events,
             status_labels=service.STATUS_LABELS,
+            packages=db.list_packages(conn),
+            latest_package_id=db.latest_package_id(conn),
+            pending_plan=db.get_pending_plan(conn),
+            publish_stats=service.publish_stats(conn),
         )
 
     @app.route("/upload", methods=["POST"])
@@ -161,6 +165,79 @@ def create_app(db_path: str | None = None) -> Flask:
             download_name=f"museum_details_snapshot{snap_id}.zip",
         )
 
+    # ---------------- 入库增量发布 ----------------
+    @app.route("/publish/calculate", methods=["POST"])
+    def publish_calculate():
+        conn = get_conn()
+        try:
+            plan_id, changes = service.calculate_plan(conn)
+        except RuntimeError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("index"))
+        if plan_id is None:
+            flash("与最近发布相比份数无变化，不生成新包", "ok")
+            return redirect(url_for("index"))
+        flash(f"已生成增量发布计划 {plan_id}（补入/撤销共 {len(changes)} 个号段），"
+              "请核对后提交", "ok")
+        return redirect(url_for("publish_plan_view", plan_id=plan_id))
+
+    @app.route("/publish/plans/<int:plan_id>")
+    def publish_plan_view(plan_id: int):
+        conn = get_conn()
+        plan = db.get_plan(conn, plan_id)
+        if plan is None:
+            abort(404)
+        ranges = db.get_plan_ranges(conn, plan_id)
+        current_version = db.current_version(conn)
+        latest_pkg = db.latest_package_id(conn)
+        stale = (plan["status"] == "pending"
+                 and (plan["data_version"] != current_version
+                      or plan["base_package"] != latest_pkg))
+        return render_template(
+            "publish_plan.html", plan=plan, ranges=ranges, stale=stale,
+            current_version=current_version, latest_package=latest_pkg,
+            kind_labels=publish.KIND_LABELS, action_labels=publish.ACTION_LABELS,
+        )
+
+    @app.route("/publish/plans/<int:plan_id>/submit", methods=["POST"])
+    def publish_submit(plan_id: int):
+        conn = get_conn()
+        try:
+            package_id = service.submit_plan(conn, plan_id)
+        except db.StaleStateError as exc:
+            flash(f"{exc}", "error")
+            return redirect(url_for("publish_plan_view", plan_id=plan_id))
+        except RuntimeError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("index"))
+        flash(f"包 {package_id} 已发布，份号状态已同步生效", "ok")
+        return redirect(url_for("package_view", pkg_id=package_id))
+
+    @app.route("/packages/<int:pkg_id>")
+    def package_view(pkg_id: int):
+        conn = get_conn()
+        pkg = db.get_package(conn, pkg_id)
+        if pkg is None:
+            abort(404)
+        ranges = db.get_package_ranges(conn, pkg_id)
+        return render_template(
+            "package.html", pkg=pkg, ranges=ranges,
+            kind_labels=publish.KIND_LABELS, action_labels=publish.ACTION_LABELS,
+        )
+
+    @app.route("/packages/<int:pkg_id>/csv")
+    def package_csv(pkg_id: int):
+        conn = get_conn()
+        pkg = db.get_package(conn, pkg_id)
+        if pkg is None:
+            abort(404)
+        return Response(
+            pkg["csv_content"].encode("utf-8-sig"),
+            mimetype="text/csv",
+            headers={"Content-Disposition":
+                     f'attachment; filename="package_{pkg_id:04d}.csv"'},
+        )
+
     # ---------------- 机器可读接口（便于核验/自动化） ----------------
     @app.route("/api/state")
     def api_state():
@@ -223,6 +300,58 @@ def create_app(db_path: str | None = None) -> Flask:
                 "X-Snapshot-Id": str(snap_id),
             },
         )
+
+    @app.route("/api/publish/calculate", methods=["POST"])
+    def api_publish_calculate():
+        conn = get_conn()
+        try:
+            plan_id, changes = service.calculate_plan(conn)
+        except RuntimeError as exc:
+            abort(409, str(exc))
+        if plan_id is None:
+            return {"ok": True, "no_change": True, "plan_id": None,
+                    "changes": []}
+        return {"ok": True, "no_change": False, "plan_id": plan_id,
+                "changes": changes}
+
+    @app.route("/api/publish/plans/<int:plan_id>")
+    def api_publish_plan(plan_id: int):
+        conn = get_conn()
+        plan = db.get_plan(conn, plan_id)
+        if plan is None:
+            abort(404)
+        ranges = [dict(r) for r in db.get_plan_ranges(conn, plan_id)]
+        return {"plan": dict(plan), "ranges": ranges,
+                "current_version": db.current_version(conn),
+                "latest_package": db.latest_package_id(conn)}
+
+    @app.route("/api/publish/plans/<int:plan_id>/submit", methods=["POST"])
+    def api_publish_submit(plan_id: int):
+        conn = get_conn()
+        try:
+            package_id = service.submit_plan(conn, plan_id)
+        except (db.StaleStateError, RuntimeError) as exc:
+            abort(409, str(exc))
+        return {"ok": True, "package_id": package_id}
+
+    @app.route("/api/packages")
+    def api_packages():
+        conn = get_conn()
+        return {"packages": [
+            {"id": p["id"], "created_at": p["created_at"],
+             "prev_id": p["prev_id"], "data_version": p["data_version"],
+             "batch_id": p["batch_id"], "add_count": p["add_count"],
+             "revoke_count": p["revoke_count"]}
+            for p in db.list_packages(conn)]}
+
+    @app.route("/api/packages/<int:pkg_id>")
+    def api_package(pkg_id: int):
+        conn = get_conn()
+        pkg = db.get_package(conn, pkg_id)
+        if pkg is None:
+            abort(404)
+        return {"package": {k: pkg[k] for k in pkg.keys() if k != "csv_content"},
+                "ranges": [dict(r) for r in db.get_package_ranges(conn, pkg_id)]}
 
     @app.errorhandler(400)
     @app.errorhandler(404)
